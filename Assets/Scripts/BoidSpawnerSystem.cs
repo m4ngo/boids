@@ -26,7 +26,7 @@ partial struct BoidSpawnerSystem : ISystem, ISystemStartStop
 
             ecb.AddComponent(newEntity, new BoidComponent { });
             ecb.SetComponent(newEntity, new LocalTransform { 
-                Position = (m_Random.NextFloat3() - new float3(0.5f)) * 2f * BoidSystem.HALF_CAGE_SIZE,
+                Position = (m_Random.NextFloat3() - new float3(0.5f)) * 2f * BoidSystem.CAGE_HALF_SIZE,
                 Rotation = quaternion.Euler((m_Random.NextFloat3() - new float3(0.5f)) * 720f),
                 Scale = 0.2f
             });

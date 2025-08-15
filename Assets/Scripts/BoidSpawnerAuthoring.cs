@@ -11,9 +11,9 @@ public class BoidSpawnerAuthoring : MonoBehaviour
         Gizmos.DrawWireCube(
             Vector3.zero,
             new Vector3(
-                BoidSystem.HALF_CAGE_SIZE * 2,
-                BoidSystem.HALF_CAGE_SIZE * 2,
-                BoidSystem.HALF_CAGE_SIZE * 2
+                BoidSystem.CAGE_HALF_SIZE * 2,
+                BoidSystem.CAGE_HALF_SIZE * 2,
+                BoidSystem.CAGE_HALF_SIZE * 2
             )
         );
     }

@@ -4,124 +4,8 @@ using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
 using Unity.Jobs;
-using System;
-using Unity.Collections.LowLevel.Unsafe;
-using Unity.Jobs.LowLevel.Unsafe;
 
-[JobProducerType(typeof(JobNativeMultiHashMapUniqueHashExtensions.JobNativeMultiHashMapMergedSharedKeyIndicesProducer<>))]
-public interface IJobNativeMultiHashMapMergedSharedKeyIndices
-{
-    // The first time each key (=hash) is encountered, ExecuteFirst() is invoked with corresponding value (=index).
-    void ExecuteFirst(int index);
-
-    // For each subsequent instance of the same key in the bucket, ExecuteNext() is invoked with the corresponding
-    // value (=index) for that key, as well as the value passed to ExecuteFirst() the first time this key
-    // was encountered (=firstIndex).
-    void ExecuteNext(int firstIndex, int index);
-}
-
-public static class JobNativeMultiHashMapUniqueHashExtensions
-{
-    internal struct JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>
-        where TJob : struct, IJobNativeMultiHashMapMergedSharedKeyIndices
-    {
-        [ReadOnly] public NativeParallelMultiHashMap<int, int> HashMap;
-        internal TJob JobData;
-
-        private static IntPtr s_JobReflectionData;
-
-        internal static IntPtr Initialize()
-        {
-            if (s_JobReflectionData == IntPtr.Zero)
-            {
-                s_JobReflectionData = JobsUtility.CreateJobReflectionData(typeof(JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>), typeof(TJob), (ExecuteJobFunction)Execute);
-            }
-
-            return s_JobReflectionData;
-        }
-
-        delegate void ExecuteJobFunction(ref JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob> jobProducer, IntPtr additionalPtr, IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex);
-
-        public static unsafe void Execute(ref JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob> jobProducer, IntPtr additionalPtr, IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex)
-        {
-            while (true)
-            {
-                int begin;
-                int end;
-
-                if (!JobsUtility.GetWorkStealingRange(ref ranges, jobIndex, out begin, out end))
-                {
-                    return;
-                }
-
-                var bucketData = jobProducer.HashMap.GetUnsafeBucketData();
-                var buckets = (int*)bucketData.buckets;
-                var nextPtrs = (int*)bucketData.next;
-                var keys = bucketData.keys;
-                var values = bucketData.values;
-
-                for (int i = begin; i < end; i++)
-                {
-                    int entryIndex = buckets[i];
-
-                    while (entryIndex != -1)
-                    {
-                        var key = UnsafeUtility.ReadArrayElement<int>(keys, entryIndex);
-                        var value = UnsafeUtility.ReadArrayElement<int>(values, entryIndex);
-                        int firstValue;
-
-                        NativeParallelMultiHashMapIterator<int> it;
-                        jobProducer.HashMap.TryGetFirstValue(key, out firstValue, out it);
-
-                        // [macton] Didn't expect a usecase for this with multiple same values
-                        // (since it's intended use was for unique indices.)
-                        // https://discussions.unity.com/t/718143/5
-                        if (entryIndex == it.GetEntryIndex())
-                        {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-                            JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobProducer), value, 1);
-#endif
-                            jobProducer.JobData.ExecuteFirst(value);
-                        }
-                        else
-                        {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-                            var startIndex = math.min(firstValue, value);
-                            var lastIndex = math.max(firstValue, value);
-                            var rangeLength = (lastIndex - startIndex) + 1;
-
-                            JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobProducer), startIndex, rangeLength);
-#endif
-                            jobProducer.JobData.ExecuteNext(firstValue, value);
-                        }
-
-                        entryIndex = nextPtrs[entryIndex];
-                    }
-                }
-            }
-        }
-    }
-
-    public static unsafe JobHandle Schedule<TJob>(this TJob jobData, NativeParallelMultiHashMap<int, int> hashMap, int minIndicesPerJobCount, JobHandle dependsOn = new JobHandle())
-        where TJob : struct, IJobNativeMultiHashMapMergedSharedKeyIndices
-    {
-        var jobProducer = new JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>
-        {
-            HashMap = hashMap,
-            JobData = jobData
-        };
-
-        var scheduleParams = new JobsUtility.JobScheduleParameters(
-            UnsafeUtility.AddressOf(ref jobProducer)
-            , JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>.Initialize()
-            , dependsOn
-            , ScheduleMode.Parallel
-        );
-
-        return JobsUtility.ScheduleParallelFor(ref scheduleParams, hashMap.GetUnsafeBucketData().bucketCapacityMask + 1, minIndicesPerJobCount);
-    }
-}
-
+[BurstCompile]
 partial struct BoidSystem : ISystem
 {
     // World attributes
@@ -190,14 +74,17 @@ partial struct BoidSystem : ISystem
 
         // Merge each cell := getting the sum of all the positions and the sum of all the headings of all boids in that cell
         JobHandle mergeJobHandle = default;
-        NativeArray<int> keys = hashMap.GetKeyArray(Allocator.TempJob);
+        var (keys, length) = hashMap.GetUniqueKeyArray(Allocator.TempJob);
         new MergeCellsJob
         {
+            hashMap = hashMap,
+            keys = keys,
+            length = length,
             cellCount = cellCount,
             positions = positions,
             headings = headings,
             boidIndices = boidIndices
-        }.Schedule(hashMap, 64, mergeJobHandle).Complete();
+        }.Schedule(keys.Length, mergeJobHandle).Complete();
 
         // Move the boids
         JobHandle moveBoidsHandle = default;
@@ -229,6 +116,7 @@ partial struct BoidSystem : ISystem
         public NativeArray<float3> positions;
         public NativeArray<float3> headings;
 
+        [BurstCompile]
         public void Execute([ReadOnly] ref LocalToWorld transform, [EntityIndexInQuery] int index)
         {
             positions[index] = transform.Position;
@@ -245,6 +133,7 @@ partial struct BoidSystem : ISystem
         [ReadOnly] public float3 positionOffsetVary;
         [ReadOnly] public float cellRadius;
 
+        [BurstCompile]
         public void Execute([ReadOnly] ref LocalToWorld transform, [EntityIndexInQuery] int index)
         {
             var hash = (int)math.hash(new int3(math.floor(math.mul(cellRotationVary, transform.Position + positionOffsetVary) / cellRadius)));
@@ -254,26 +143,41 @@ partial struct BoidSystem : ISystem
 
     // Merges the cells to get the sum of the positions and headings. Stores the value in the existing positions and headings arrays.
     [BurstCompile]
-    private struct MergeCellsJob : IJobNativeMultiHashMapMergedSharedKeyIndices
+    private partial struct MergeCellsJob : IJobFor
     {
+        [ReadOnly] public NativeParallelMultiHashMap<int, int> hashMap;
+        [ReadOnly] public NativeArray<int> keys;
+        [ReadOnly] public int length;
         public NativeArray<int> boidIndices;
+        public NativeArray<int> cellCount;
         public NativeArray<float3> positions;
         public NativeArray<float3> headings;
-        public NativeArray<int> cellCount;
 
-        public void ExecuteFirst(int firstBoidIndexEncountered)
+        [BurstCompile]
+        public void Execute(int i)
         {
-            boidIndices[firstBoidIndexEncountered] = firstBoidIndexEncountered;
-            cellCount[firstBoidIndexEncountered] = 1;
-            float3 positionInThisCell = positions[firstBoidIndexEncountered] / cellCount[firstBoidIndexEncountered];
-        }
+            if (i >= length)
+            {
+                return;
+            }
 
-        public void ExecuteNext(int firstBoidIndexAsCellKey, int boidIndexEncountered)
-        {
-            cellCount[firstBoidIndexAsCellKey] += 1;
-            headings[firstBoidIndexAsCellKey] += headings[boidIndexEncountered];
-            positions[firstBoidIndexAsCellKey] += positions[boidIndexEncountered];
-            boidIndices[boidIndexEncountered] = firstBoidIndexAsCellKey;
+            int key = keys[i];
+            float3 posSum = 0;
+            float3 headSum = 0;
+
+            if (hashMap.TryGetFirstValue(key, out int boidIndex, out var iterator))
+            {
+                int firstIndex = boidIndex;
+                boidIndices[firstIndex] = firstIndex;
+                cellCount[firstIndex] = 1;
+                while (hashMap.TryGetNextValue(out boidIndex, ref iterator))
+                {
+                    positions[firstIndex] += positions[boidIndex];
+                    headings[firstIndex] += headings[boidIndex];
+                    boidIndices[boidIndex] = firstIndex;
+                    cellCount[firstIndex]++;
+                }
+            }
         }
     }
 
@@ -287,6 +191,7 @@ partial struct BoidSystem : ISystem
         [ReadOnly] public NativeArray<int> boidIndices;
         [ReadOnly] public float deltaTime;
 
+        [BurstCompile]
         public void Execute(ref LocalToWorld localToWorld, [EntityIndexInQuery] int index)
         {
             float3 boidPosition = localToWorld.Position;

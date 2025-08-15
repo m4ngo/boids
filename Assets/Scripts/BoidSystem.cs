@@ -10,7 +10,7 @@ partial struct BoidSystem : ISystem
 {
     // World attributes
     public const float HALF_CAGE_SIZE = 10f;
-    public const int AMOUNT = 1500;
+    public const int AMOUNT = 5000;
 
     // Boid attributes
     private const float SPEED = 10f;
@@ -21,9 +21,6 @@ partial struct BoidSystem : ISystem
     private const float COHESION = 1f;
     private const float ALIGNMENT = 1f;
     private const float OBSTACLE = 5f;
-
-    // Spatial optimization
-    //private NativeParallelMultiHashMap<int3, NativeList<float3x2>> WORLD_MAP;
 
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
@@ -57,48 +54,6 @@ partial struct BoidSystem : ISystem
         job.Schedule(query);
     }
 
-    //private float3 CalculateForces(float3 self)
-    //{
-    //    float3 separationSum = float3.zero;
-    //    float3 positionSum = float3.zero;
-    //    float3 headingSum = float3.zero;
-
-    //    // Temp list
-    //    NativeList<float3x2> nearby = new NativeList<float3x2>();
-    //    foreach (float3x2 near in nearby)
-    //    {
-    //        float dist = Vector3.Distance(near.c0, self);
-    //        separationSum += -(near.c0 - self) * (1f / Mathf.Max(dist, 0.0001f));
-    //        positionSum += near.c0;
-    //        headingSum += near.c1;
-    //    }
-
-    //    float3 separationForce = float3.zero;
-    //    float3 cohesionForce = float3.zero;
-    //    float3 alignmentForce = float3.zero;
-    //    float3 avoidWallsForce = float3.zero;
-
-    //    int total = nearby.Length;
-
-    //    if (total > 0)
-    //    {
-    //        separationForce = separationSum / total;
-    //        cohesionForce = (positionSum / total) - self;
-    //        alignmentForce = headingSum / total;
-    //    }
-
-    //    if (MinDistToBorder(self) < SENSE_DIST)
-    //    {
-    //        avoidWallsForce = -Vector3.Normalize(self);
-    //    }
-
-    //    return
-    //        separationForce * SEPARATION +
-    //        cohesionForce * COHESION +
-    //        alignmentForce * ALIGNMENT +
-    //        avoidWallsForce * OBSTACLE;
-    //}
-
     private static float MinDistToBorder(Vector3 pos)
     {
         return Mathf.Min(Mathf.Min(
@@ -108,6 +63,7 @@ partial struct BoidSystem : ISystem
         );
     }
 
+    [BurstCompile]
     public partial struct BoidJob : IJobEntity
     {
         [ReadOnly]

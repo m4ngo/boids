@@ -1,7 +1,5 @@
 using UnityEngine;
 using Unity.Entities;
-using Unity.Mathematics;
-using System.Collections.Generic;
 
 public class BoidSpawnerAuthoring : MonoBehaviour
 {

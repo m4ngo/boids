@@ -11,7 +11,7 @@ partial struct BoidSystem : ISystem
     // World attributes
     public const float CAGE_HALF_SIZE = 20f;
     public const float CAGE_SQUARE_RADIUS = 400f;
-    public const int AMOUNT = 200000;
+    public const int AMOUNT = 300000;
 
     // Boid attributes
     private const float SPEED = 5f;
@@ -19,10 +19,10 @@ partial struct BoidSystem : ISystem
     public const float BOID_SCALE = 0.1f;
 
     // Weights
-    private const float SEPARATION = 20f;
-    private const float COHESION = 10f;
-    private const float ALIGNMENT = 10f;
-    private const float OBSTACLE = 30f;
+    private const float SEPARATION = 30f;
+    private const float COHESION = 15f;
+    private const float ALIGNMENT = 20f;
+    private const float OBSTACLE = 8f;
 
     private EntityQuery boidGroup;
 

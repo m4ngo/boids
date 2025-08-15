@@ -4,24 +4,141 @@ using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
 using Unity.Jobs;
-using UnityEngine;
+using System;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs.LowLevel.Unsafe;
+
+[JobProducerType(typeof(JobNativeMultiHashMapUniqueHashExtensions.JobNativeMultiHashMapMergedSharedKeyIndicesProducer<>))]
+public interface IJobNativeMultiHashMapMergedSharedKeyIndices
+{
+    // The first time each key (=hash) is encountered, ExecuteFirst() is invoked with corresponding value (=index).
+    void ExecuteFirst(int index);
+
+    // For each subsequent instance of the same key in the bucket, ExecuteNext() is invoked with the corresponding
+    // value (=index) for that key, as well as the value passed to ExecuteFirst() the first time this key
+    // was encountered (=firstIndex).
+    void ExecuteNext(int firstIndex, int index);
+}
+
+public static class JobNativeMultiHashMapUniqueHashExtensions
+{
+    internal struct JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>
+        where TJob : struct, IJobNativeMultiHashMapMergedSharedKeyIndices
+    {
+        [ReadOnly] public NativeParallelMultiHashMap<int, int> HashMap;
+        internal TJob JobData;
+
+        private static IntPtr s_JobReflectionData;
+
+        internal static IntPtr Initialize()
+        {
+            if (s_JobReflectionData == IntPtr.Zero)
+            {
+                s_JobReflectionData = JobsUtility.CreateJobReflectionData(typeof(JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>), typeof(TJob), (ExecuteJobFunction)Execute);
+            }
+
+            return s_JobReflectionData;
+        }
+
+        delegate void ExecuteJobFunction(ref JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob> jobProducer, IntPtr additionalPtr, IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex);
+
+        public static unsafe void Execute(ref JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob> jobProducer, IntPtr additionalPtr, IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex)
+        {
+            while (true)
+            {
+                int begin;
+                int end;
+
+                if (!JobsUtility.GetWorkStealingRange(ref ranges, jobIndex, out begin, out end))
+                {
+                    return;
+                }
+
+                var bucketData = jobProducer.HashMap.GetUnsafeBucketData();
+                var buckets = (int*)bucketData.buckets;
+                var nextPtrs = (int*)bucketData.next;
+                var keys = bucketData.keys;
+                var values = bucketData.values;
+
+                for (int i = begin; i < end; i++)
+                {
+                    int entryIndex = buckets[i];
+
+                    while (entryIndex != -1)
+                    {
+                        var key = UnsafeUtility.ReadArrayElement<int>(keys, entryIndex);
+                        var value = UnsafeUtility.ReadArrayElement<int>(values, entryIndex);
+                        int firstValue;
+
+                        NativeParallelMultiHashMapIterator<int> it;
+                        jobProducer.HashMap.TryGetFirstValue(key, out firstValue, out it);
+
+                        // [macton] Didn't expect a usecase for this with multiple same values
+                        // (since it's intended use was for unique indices.)
+                        // https://discussions.unity.com/t/718143/5
+                        if (entryIndex == it.GetEntryIndex())
+                        {
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                            JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobProducer), value, 1);
+#endif
+                            jobProducer.JobData.ExecuteFirst(value);
+                        }
+                        else
+                        {
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                            var startIndex = math.min(firstValue, value);
+                            var lastIndex = math.max(firstValue, value);
+                            var rangeLength = (lastIndex - startIndex) + 1;
+
+                            JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobProducer), startIndex, rangeLength);
+#endif
+                            jobProducer.JobData.ExecuteNext(firstValue, value);
+                        }
+
+                        entryIndex = nextPtrs[entryIndex];
+                    }
+                }
+            }
+        }
+    }
+
+    public static unsafe JobHandle Schedule<TJob>(this TJob jobData, NativeParallelMultiHashMap<int, int> hashMap, int minIndicesPerJobCount, JobHandle dependsOn = new JobHandle())
+        where TJob : struct, IJobNativeMultiHashMapMergedSharedKeyIndices
+    {
+        var jobProducer = new JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>
+        {
+            HashMap = hashMap,
+            JobData = jobData
+        };
+
+        var scheduleParams = new JobsUtility.JobScheduleParameters(
+            UnsafeUtility.AddressOf(ref jobProducer)
+            , JobNativeMultiHashMapMergedSharedKeyIndicesProducer<TJob>.Initialize()
+            , dependsOn
+            , ScheduleMode.Parallel
+        );
+
+        return JobsUtility.ScheduleParallelFor(ref scheduleParams, hashMap.GetUnsafeBucketData().bucketCapacityMask + 1, minIndicesPerJobCount);
+    }
+}
 
 partial struct BoidSystem : ISystem
 {
     // World attributes
-    public const float CAGE_HALF_SIZE = 15f;
-    public const float CAGE_SQUARE_RADIUS = 225f;
-    public const int AMOUNT = 5000;
+    public const float CAGE_HALF_SIZE = 20f;
+    public const float CAGE_SQUARE_RADIUS = 400f;
+    public const int AMOUNT = 200000;
 
     // Boid attributes
-    private const float SPEED = 10f;
-    private const float SENSE_DIST = 5f;
+    private const float SPEED = 5f;
+    private const float SENSE_DIST = 10f;
+    public const float BOID_SCALE = 0.1f;
 
     // Weights
-    private const float SEPARATION = 1f;
-    private const float COHESION = 0f;
-    private const float ALIGNMENT = 0f;
-    private const float OBSTACLE = 0f;
+    private const float SEPARATION = 20f;
+    private const float COHESION = 10f;
+    private const float ALIGNMENT = 10f;
+    private const float OBSTACLE = 30f;
 
     private EntityQuery boidGroup;
 
@@ -37,19 +154,13 @@ partial struct BoidSystem : ISystem
 
         NativeArray<float3> positions = new NativeArray<float3>(AMOUNT, Allocator.TempJob);
         NativeArray<float3> headings = new NativeArray<float3>(AMOUNT, Allocator.TempJob);
-        int iterator = 0;
 
-        NativeArray<Entity> boids = boidGroup.ToEntityArray(Allocator.Temp);
-        foreach (Entity entity in boids)
+        JobHandle storePositionsHeadingsHandle = default;
+        new StorePositionAndHeadingJob
         {
-            if (entityManager.HasComponent<BoidComponent>(entity))
-            {
-                LocalToWorld localTransform = entityManager.GetComponentData<LocalToWorld>(entity);
-                positions[iterator] = localTransform.Position;
-                headings[iterator] = localTransform.Forward;
-                iterator++;
-            }
-        }
+            positions = positions,
+            headings = headings
+        }.ScheduleParallel(boidGroup, storePositionsHeadingsHandle).Complete();
 
         NativeArray<int> boidIndices = new NativeArray<int>(AMOUNT, Allocator.TempJob); // where i = the boid's index, and boidIndices[i] = the boid's merged cell index
         NativeArray<int> cellCount = new NativeArray<int>(AMOUNT, Allocator.TempJob); // where i = the boid's boidIndices[i] index, and cellCount[boidIndices[i]] = the number of boids in its cell
@@ -58,34 +169,35 @@ partial struct BoidSystem : ISystem
         // Hash all the boid positions into cells
         JobHandle hashPositionsHandle = default;
         float offsetRange = SENSE_DIST / 2f;
+        quaternion randomHashRotation = quaternion.Euler(
+            UnityEngine.Random.Range(-360f, 360f),
+            UnityEngine.Random.Range(-360f, 360f),
+            UnityEngine.Random.Range(-360f, 360f)
+        );
+        float3 randomHashOffset = new float3(
+            UnityEngine.Random.Range(-offsetRange, offsetRange),
+            UnityEngine.Random.Range(-offsetRange, offsetRange),
+            UnityEngine.Random.Range(-offsetRange, offsetRange)
+        );
+
         new HashPositionsToHashMapJob
         {
             hashMap = hashMap.AsParallelWriter(),
-            cellRotationVary = quaternion.Euler(
-                UnityEngine.Random.Range(-360f, 360f),
-                UnityEngine.Random.Range(-360f, 360f),
-                UnityEngine.Random.Range(-360f, 360f)
-            ),
-            positionOffsetVary = new float3(
-                UnityEngine.Random.Range(-offsetRange, offsetRange),
-                UnityEngine.Random.Range(-offsetRange, offsetRange),
-                UnityEngine.Random.Range(-offsetRange, offsetRange)
-            ),
+            cellRotationVary = randomHashRotation,
+            positionOffsetVary = randomHashOffset,
             cellRadius = SENSE_DIST
-        }.Schedule(boidGroup, hashPositionsHandle).Complete();
+        }.ScheduleParallel(boidGroup, hashPositionsHandle).Complete();
 
         // Merge each cell := getting the sum of all the positions and the sum of all the headings of all boids in that cell
         JobHandle mergeJobHandle = default;
         NativeArray<int> keys = hashMap.GetKeyArray(Allocator.TempJob);
         new MergeCellsJob
         {
-            hashMap = hashMap,
-            keys = keys,
             cellCount = cellCount,
             positions = positions,
             headings = headings,
             boidIndices = boidIndices
-        }.Schedule(keys.Length, mergeJobHandle).Complete();
+        }.Schedule(hashMap, 64, mergeJobHandle).Complete();
 
         // Move the boids
         JobHandle moveBoidsHandle = default;
@@ -100,7 +212,6 @@ partial struct BoidSystem : ISystem
 
         positions.Dispose();
         headings.Dispose();
-        boids.Dispose();
         boidIndices.Dispose();
         cellCount.Dispose();
         hashMap.Dispose();
@@ -110,6 +221,19 @@ partial struct BoidSystem : ISystem
     private static float MinDistToBorder(float3 pos)
     {
         return CAGE_SQUARE_RADIUS - math.lengthsq(pos);
+    }
+
+    [BurstCompile]
+    private partial struct StorePositionAndHeadingJob : IJobEntity
+    {
+        public NativeArray<float3> positions;
+        public NativeArray<float3> headings;
+
+        public void Execute([ReadOnly] ref LocalToWorld transform, [EntityIndexInQuery] int index)
+        {
+            positions[index] = transform.Position;
+            headings[index] = transform.Forward;
+        }
     }
 
     // Assign boids to a cell in the hashmap. Uses random offset and position to remove edge artefacts.
@@ -130,34 +254,26 @@ partial struct BoidSystem : ISystem
 
     // Merges the cells to get the sum of the positions and headings. Stores the value in the existing positions and headings arrays.
     [BurstCompile]
-    private partial struct MergeCellsJob : IJobFor
+    private struct MergeCellsJob : IJobNativeMultiHashMapMergedSharedKeyIndices
     {
-        [ReadOnly] public NativeParallelMultiHashMap<int, int> hashMap;
-        [ReadOnly] public NativeArray<int> keys;
         public NativeArray<int> boidIndices;
-        public NativeArray<int> cellCount;
         public NativeArray<float3> positions;
         public NativeArray<float3> headings;
+        public NativeArray<int> cellCount;
 
-        public void Execute(int i)
+        public void ExecuteFirst(int firstBoidIndexEncountered)
         {
-            int key = keys[i];
-            float3 posSum = 0;
-            float3 headSum = 0;
+            boidIndices[firstBoidIndexEncountered] = firstBoidIndexEncountered;
+            cellCount[firstBoidIndexEncountered] = 1;
+            float3 positionInThisCell = positions[firstBoidIndexEncountered] / cellCount[firstBoidIndexEncountered];
+        }
 
-            if (hashMap.TryGetFirstValue(key, out int boidIndex, out var iterator))
-            {
-                int firstIndex = boidIndex;
-                boidIndices[firstIndex] = firstIndex;
-                cellCount[firstIndex] = 1;
-                while (hashMap.TryGetNextValue(out boidIndex, ref iterator))
-                {
-                    positions[firstIndex] += positions[boidIndex];
-                    headings[firstIndex] += headings[boidIndex];
-                    boidIndices[boidIndex] = firstIndex;
-                    cellCount[firstIndex]++;
-                }
-            }
+        public void ExecuteNext(int firstBoidIndexAsCellKey, int boidIndexEncountered)
+        {
+            cellCount[firstBoidIndexAsCellKey] += 1;
+            headings[firstBoidIndexAsCellKey] += headings[boidIndexEncountered];
+            positions[firstBoidIndexAsCellKey] += positions[boidIndexEncountered];
+            boidIndices[boidIndexEncountered] = firstBoidIndexAsCellKey;
         }
     }
 
@@ -171,52 +287,49 @@ partial struct BoidSystem : ISystem
         [ReadOnly] public NativeArray<int> boidIndices;
         [ReadOnly] public float deltaTime;
 
-        public void Execute(ref LocalToWorld transform, [EntityIndexInQuery] int index)
+        public void Execute(ref LocalToWorld localToWorld, [EntityIndexInQuery] int index)
         {
-            float3 self = transform.Position;
-            int boidIndex = boidIndices[index];
+            float3 boidPosition = localToWorld.Position;
+            int cellIndex = boidIndices[index];
 
-            // Calculate boid forces and apply new position and rotation
-            int neighborCount = cellCount[boidIndex] - 1;
-            float3 positionSum = positions[boidIndex] - self;  // remember to subtract because we dont include itself
-            float3 headingSum = headings[boidIndex] - transform.Forward;
+            int nearbyBoidCount = cellCount[cellIndex] - 1;
+            float3 positionSum = positions[cellIndex] - localToWorld.Position;
+            float3 headingSum = headings[cellIndex] - localToWorld.Forward;
 
-            float3 velocity = float3.zero;
+            float3 force = float3.zero;
 
-            if (neighborCount > 0)
+            if (nearbyBoidCount > 0)
             {
-                float3 averagePosition = positionSum / neighborCount;
+                float3 averagePosition = positionSum / nearbyBoidCount;
 
-                float distToAveragePositionSq = math.lengthsq(averagePosition - self);
+                float distToAveragePositionSq = math.lengthsq(averagePosition - boidPosition);
                 float maxDistToAveragePositionSq = SENSE_DIST * SENSE_DIST;
 
                 float distanceNormalized = distToAveragePositionSq / maxDistToAveragePositionSq;
                 float needToLeave = math.max(1 - distanceNormalized, 0f);
 
-                float3 toAveragePosition = math.normalizesafe(averagePosition - self);
-                float3 averageHeading = headingSum / neighborCount;
-                
-                velocity += -toAveragePosition * needToLeave * SEPARATION;
-                velocity += toAveragePosition * COHESION;
-                velocity += averageHeading *ALIGNMENT;
+                float3 toAveragePosition = math.normalizesafe(averagePosition - boidPosition);
+                float3 averageHeading = headingSum / nearbyBoidCount;
+
+                force += -toAveragePosition * SEPARATION * needToLeave;
+                force += toAveragePosition * COHESION;
+                force += averageHeading * ALIGNMENT;
             }
 
-            if (math.min(math.min(
-                (CAGE_HALF_SIZE) - math.abs(self.x),
-                (CAGE_HALF_SIZE) - math.abs(self.y)),
-                (CAGE_HALF_SIZE) - math.abs(self.z))
-                    < SENSE_DIST)
+            if (MinDistToBorder(boidPosition) < SENSE_DIST)
             {
-                velocity += -math.normalize(self) * OBSTACLE;
+                force += -math.normalize(boidPosition) * OBSTACLE;
             }
 
-            float3 moveAmount = velocity * SPEED;
+            float3 velocity = localToWorld.Forward * SPEED;
+            velocity += force * deltaTime;
+            velocity = math.normalize(velocity) * SPEED;
 
-            transform.Value = float4x4.TRS(
-                self + moveAmount * deltaTime, 
-                quaternion.LookRotationSafe(moveAmount, transform.Up), 
-                new float3(0.2f)
-                );
+            localToWorld.Value = float4x4.TRS(
+                localToWorld.Position + velocity * deltaTime,
+                quaternion.LookRotationSafe(velocity, localToWorld.Up),
+                new float3(BOID_SCALE)
+            );
         }
     }
 }

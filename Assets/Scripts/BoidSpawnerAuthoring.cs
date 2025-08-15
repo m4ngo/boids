@@ -8,14 +8,7 @@ public class BoidSpawnerAuthoring : MonoBehaviour
     private void OnDrawGizmos()
     {
         Gizmos.color = Color.red;
-        Gizmos.DrawWireCube(
-            Vector3.zero,
-            new Vector3(
-                BoidSystem.CAGE_HALF_SIZE * 2,
-                BoidSystem.CAGE_HALF_SIZE * 2,
-                BoidSystem.CAGE_HALF_SIZE * 2
-            )
-        );
+        Gizmos.DrawWireSphere(Vector3.zero, BoidSystem.CAGE_HALF_SIZE);
     }
 }
 

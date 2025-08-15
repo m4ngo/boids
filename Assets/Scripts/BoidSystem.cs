@@ -10,6 +10,7 @@ partial struct BoidSystem : ISystem
 {
     // World attributes
     public const float HALF_CAGE_SIZE = 10f;
+    public const int AMOUNT = 1500;
 
     // Boid attributes
     private const float SPEED = 10f;
@@ -30,68 +31,30 @@ partial struct BoidSystem : ISystem
         EntityManager entityManager = state.EntityManager;
 
         NativeArray<Entity> entities = entityManager.GetAllEntities(Allocator.Temp);
+        NativeArray<float3> positions = new NativeArray<float3>(AMOUNT, Allocator.TempJob);
+        NativeArray<float3> headings = new NativeArray<float3>(AMOUNT, Allocator.TempJob);
+        int iterator = 0;
 
         foreach (Entity entity in entities)
         {
             if (entityManager.HasComponent<BoidComponent>(entity))
             {
                 LocalTransform localTransform = entityManager.GetComponentData<LocalTransform>(entity);
-
-                float3 self = localTransform.Position;
-
-                // Calculate boid forces and apply new position and rotation
-                float3 separationSum = float3.zero;
-                float3 positionSum = float3.zero;
-                float3 headingSum = float3.zero;
-                int total = 0;
-
-                foreach (Entity e in entities)
-                {
-                    if (entityManager.HasComponent<BoidComponent>(e))
-                    {
-                        LocalTransform otherTrans = entityManager.GetComponentData<LocalTransform>(e);
-                        float dist = Vector3.Distance(otherTrans.Position, self);
-                        if (dist > SENSE_DIST)
-                        {
-                            continue;
-                        }
-                        total++;
-                        separationSum += -(otherTrans.Position - self) * (1f / Mathf.Max(dist, 0.0001f));
-                        positionSum += otherTrans.Position;
-                        headingSum += otherTrans.Forward();
-                    }
-                }
-
-                float3 separationForce = float3.zero;
-                float3 cohesionForce = float3.zero;
-                float3 alignmentForce = float3.zero;
-                float3 avoidWallsForce = float3.zero;
-
-                if (total > 0)
-                {
-                    separationForce = separationSum / total;
-                    cohesionForce = (positionSum / total) - self;
-                    alignmentForce = headingSum / total;
-                }
-
-                if (MinDistToBorder(self) < SENSE_DIST)
-                {
-                    avoidWallsForce = -Vector3.Normalize(self);
-                }
-
-                float3 moveAmount =
-                    separationForce * SEPARATION +
-                    cohesionForce * COHESION +
-                    alignmentForce * ALIGNMENT +
-                    avoidWallsForce * OBSTACLE;
-
-                localTransform.Position = localTransform.Position + moveAmount * SystemAPI.Time.DeltaTime * SPEED;
-                localTransform.Rotation = Quaternion.LookRotation(moveAmount);
-
-                // Apply updated components
-                entityManager.SetComponentData<LocalTransform>(entity, localTransform);
+                positions[iterator] = localTransform.Position;
+                headings[iterator] = localTransform.Forward();
+                iterator++;
             }
         }
+
+        var job = new BoidJob
+        {
+            positions = positions,
+            headings = headings,
+            deltaTime = SystemAPI.Time.DeltaTime
+        };
+
+        EntityQuery query = SystemAPI.QueryBuilder().WithAll<LocalTransform>().WithAll<BoidComponent>().Build();
+        job.Schedule(query);
     }
 
     //private float3 CalculateForces(float3 self)

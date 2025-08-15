@@ -20,7 +20,7 @@ partial struct BoidSpawnerSystem : ISystem, ISystemStartStop
 
         Random m_Random = Random.CreateFromIndex((uint)SystemAPI.Time.ElapsedTime);
 
-        for (int i = 0; i < spawner.ValueRO.amount; i++) // Spawn boids
+        for (int i = 0; i < BoidSystem.AMOUNT; i++) // Spawn boids
         {
             Entity newEntity = ecb.Instantiate(spawner.ValueRO.prefab);
 

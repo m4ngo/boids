@@ -6,7 +6,6 @@ using System.Collections.Generic;
 public class BoidSpawnerAuthoring : MonoBehaviour
 {
     public GameObject prefab;
-    public int amount;
 
     private void OnDrawGizmos()
     {
@@ -30,8 +29,7 @@ class BoidSpawnerBaker : Baker<BoidSpawnerAuthoring>
 
         AddComponent(entity, new BoidSpawnerComponent
         {
-            prefab = GetEntity(authoring.prefab, TransformUsageFlags.WorldSpace),
-            amount = authoring.amount
+            prefab = GetEntity(authoring.prefab, TransformUsageFlags.WorldSpace)
         });
     }
 }

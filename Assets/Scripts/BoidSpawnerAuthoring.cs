@@ -5,6 +5,11 @@ public class BoidSpawnerAuthoring : MonoBehaviour
 {
     public GameObject prefab;
 
+    private void Start()
+    {
+        Debug.LogError("GAME STARTED");
+    }
+
     private void OnDrawGizmos()
     {
         Gizmos.color = Color.red;
